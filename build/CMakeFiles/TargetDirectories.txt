@@ -1,0 +1,5 @@
+/mnt/g/Sarah/Si Vision intern/Final Project/milestone 2/KCFcpp/build/CMakeFiles/KCF.dir
+/mnt/g/Sarah/Si Vision intern/Final Project/milestone 2/KCFcpp/build/CMakeFiles/test_hog_features.dir
+/mnt/g/Sarah/Si Vision intern/Final Project/milestone 2/KCFcpp/build/CMakeFiles/test_hanning.dir
+/mnt/g/Sarah/Si Vision intern/Final Project/milestone 2/KCFcpp/build/CMakeFiles/edit_cache.dir
+/mnt/g/Sarah/Si Vision intern/Final Project/milestone 2/KCFcpp/build/CMakeFiles/rebuild_cache.dir

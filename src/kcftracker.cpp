@@ -86,6 +86,7 @@ the use of this software, even if advised of the possibility of such damage.
 #include "recttools.hpp"
 #include "fhog.hpp"
 #include "labdata.hpp"
+#include "hog_scalar.hpp"
 #endif
 
 // Constructor
@@ -403,7 +404,7 @@ cv::Mat KCFTracker::getFeatures(const cv::Mat & image, bool inithann, float scal
 
     // HOG features
     if (_hogfeatures) {
-        IplImage z_ipl = z;
+        IplImage z_ipl = cvIplImage(z);
         CvLSVMFeatureMapCaskade *map;
         getFeatureMaps(&z_ipl, cell_size, &map);
         normalizeAndTruncate(map,0.2f);
@@ -474,7 +475,22 @@ cv::Mat KCFTracker::getFeatures(const cv::Mat & image, bool inithann, float scal
     if (inithann) {
         createHanningMats();
     }
-    FeaturesMap = hann.mul(FeaturesMap);
+    CV_Assert(FeaturesMap.type() == CV_32F);
+    CV_Assert(hann.type() == CV_32F);
+    CV_Assert(FeaturesMap.size() == hann.size());
+    CV_Assert(FeaturesMap.isContinuous() && hann.isContinuous());
+
+    cv::Mat weighted(FeaturesMap.rows, FeaturesMap.cols, CV_32F);
+
+    applyHanningScalar(
+        FeaturesMap.ptr<float>(),
+        hann.ptr<float>(),
+        weighted.ptr<float>(),
+        FeaturesMap.rows,
+        FeaturesMap.cols
+    );
+
+    FeaturesMap = weighted;
     return FeaturesMap;
 }
     
