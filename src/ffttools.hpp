@@ -1,7 +1,7 @@
-/* 
+/*
 Author: Christian Bailer
-Contact address: Christian.Bailer@dfki.de 
-Department Augmented Vision DFKI 
+Contact address: Christian.Bailer@dfki.de
+Department Augmented Vision DFKI
 
                           License Agreement
                For Open Source Computer Vision Library
@@ -34,204 +34,199 @@ the use of this software, even if advised of the possibility of such damage.
 */
 
 #pragma once
+#include <vector>
+#include <map>
+#include <cmath>
+#include <algorithm>
+#include <utility>
 
-//#include <cv.h>
-
-#ifndef _OPENCV_FFTTOOLS_HPP_
-#define _OPENCV_FFTTOOLS_HPP_
-#endif
-
-//NOTE: FFTW support is still shaky, disabled for now.
-/*#ifdef USE_FFTW
-#include <fftw3.h>
-#endif*/
+typedef std::vector<float> FVec; // same typedef as in kcftracker.hpp
 
 namespace FFTTools
 {
-// Previous declarations, to avoid warnings
-cv::Mat fftd(cv::Mat img, bool backwards = false);
-cv::Mat real(cv::Mat img);
-cv::Mat imag(cv::Mat img);
-cv::Mat magnitude(cv::Mat img);
-cv::Mat complexMultiplication(cv::Mat a, cv::Mat b);
-cv::Mat complexDivision(cv::Mat a, cv::Mat b);
-void rearrange(cv::Mat &img);
-void normalizedLogTransform(cv::Mat &img);
-
-
-cv::Mat fftd(cv::Mat img, bool backwards)
-{
-/*
-#ifdef USE_FFTW
-
-    fftw_complex * fm = (fftw_complex*) fftw_malloc(sizeof (fftw_complex) * img.cols * img.rows);
-
-    fftw_plan p = fftw_plan_dft_2d(img.rows, img.cols, fm, fm, backwards ? 1 : -1, 0 * FFTW_ESTIMATE);
-
-
-    if (img.channels() == 1)
+    struct cpx
     {
-        for (int i = 0; i < img.rows; i++)
-            for (int j = 0; j < img.cols; j++)
-            {
-                fm[i * img.cols + j][0] = img.at<float>(i, j);
-                fm[i * img.cols + j][1] = 0;
-            }
-    }
-    else
+        double re, im;
+    };
+
+    inline const std::vector<cpx> &twiddles(int N)
     {
-        assert(img.channels() == 2);
-        for (int i = 0; i < img.rows; i++)
-            for (int j = 0; j < img.cols; j++)
-            {
-                fm[i * img.cols + j][0] = img.at<cv::Vec2d > (i, j)[0];
-                fm[i * img.cols + j][1] = img.at<cv::Vec2d > (i, j)[1];
-            }
-    }
-    fftw_execute(p);
-    cv::Mat res(img.rows, img.cols, CV_64FC2);
-
-
-    for (int i = 0; i < img.rows; i++)
-        for (int j = 0; j < img.cols; j++)
+        static std::map<int, std::vector<cpx>> cache;
+        std::map<int, std::vector<cpx>>::iterator it = cache.find(N);
+        if (it == cache.end())
         {
-            res.at<cv::Vec2d > (i, j)[0] = fm[i * img.cols + j][0];
-            res.at<cv::Vec2d > (i, j)[1] = fm[i * img.cols + j][1];
-
-            //  _iout(fm[i * img.cols + j][0]);
+            std::vector<cpx> t(N);
+            for (int j = 0; j < N; j++)
+            {
+                double a = -2.0 * 3.14159265358979323846 * j / N;
+                t[j].re = std::cos(a);
+                t[j].im = std::sin(a);
+            }
+            it = cache.insert(std::make_pair(N, t)).first;
         }
-
-    if (backwards)res *= 1.d / (float) (res.cols * res.rows);
-
-    fftw_free(p);
-    fftw_free(fm);
-    return res;
-
-#else
-*/
-    if (img.channels() == 1)
-    {
-        cv::Mat planes[] = {cv::Mat_<float> (img), cv::Mat_<float>::zeros(img.size())};
-        //cv::Mat planes[] = {cv::Mat_<double> (img), cv::Mat_<double>::zeros(img.size())};
-        cv::merge(planes, 2, img);
+        return it->second;
     }
-    cv::dft(img, img, backwards ? (cv::DFT_INVERSE | cv::DFT_SCALE) : 0 );
 
-    return img;
+    // Recursive mixed-radix DFT of n points read from in[j*stride]; result in out[0..n-1].
+    // tw = W_N table (n divides N). t = scratch of at least n elements.
+    inline void fft_rec(const cpx *in, cpx *out, int n, int stride, bool inv,
+                        const cpx *tw, int N, cpx *t)
+    {
+        if (n == 1)
+        {
+            out[0] = in[0];
+            return;
+        }
+        int p = 2;
+        while (n % p)
+            p++;
+        const int m = n / p;
+        for (int r = 0; r < p; r++)
+            fft_rec(in + (size_t)r * stride, out + r * m, m, stride * p, inv, tw, N, t);
 
-/*#endif*/
+        const int stepN = N / n, stepP = N / p;
+        for (int k = 0; k < m; k++)
+        {
+            for (int r = 0; r < p; r++)
+            {
+                cpx v = out[r * m + k];
+                cpx w = tw[(int)(((long long)r * k * stepN) % N)];
+                if (inv)
+                    w.im = -w.im;
+                t[r].re = v.re * w.re - v.im * w.im;
+                t[r].im = v.re * w.im + v.im * w.re;
+            }
+            for (int q = 0; q < p; q++)
+            {
+                double sr = 0, si = 0;
+                for (int r = 0; r < p; r++)
+                {
+                    cpx w = tw[((r * q) % p) * stepP];
+                    if (inv)
+                        w.im = -w.im;
+                    sr += t[r].re * w.re - t[r].im * w.im;
+                    si += t[r].re * w.im + t[r].im * w.re;
+                }
+                out[k + q * m].re = sr;
+                out[k + q * m].im = si;
+            }
+        }
+    }
 
-}
+    inline void transform2d(std::vector<cpx> &a, int H, int W, bool inv)
+    {
+        const std::vector<cpx> &twW = twiddles(W);
+        const std::vector<cpx> &twH = twiddles(H);
+        const int M = std::max(H, W);
+        std::vector<cpx> out(M), scr(M), col(H);
+        for (int y = 0; y < H; y++)
+        {
+            fft_rec(&a[(size_t)y * W], out.data(), W, 1, inv, twW.data(), W, scr.data());
+            std::copy(out.begin(), out.begin() + W, a.begin() + (size_t)y * W);
+        }
+        for (int x = 0; x < W; x++)
+        {
+            for (int y = 0; y < H; y++)
+                col[y] = a[(size_t)y * W + x];
+            fft_rec(col.data(), out.data(), H, 1, inv, twH.data(), H, scr.data());
+            for (int y = 0; y < H; y++)
+                a[(size_t)y * W + x] = out[y];
+        }
+        if (inv)
+        {
+            const double s = 1.0 / ((double)H * W);
+            for (size_t i = 0; i < a.size(); i++)
+            {
+                a[i].re *= s;
+                a[i].im *= s;
+            }
+        }
+    }
 
-cv::Mat real(cv::Mat img)
-{
-    std::vector<cv::Mat> planes;
-    cv::split(img, planes);
-    return planes[0];
-}
+    // real H*W (row-major) -> complex H*W, interleaved re/im
+    inline FVec fft2(const float *re, int H, int W)
+    {
+        std::vector<cpx> a((size_t)H * W);
+        for (size_t i = 0; i < a.size(); i++)
+        {
+            a[i].re = re[i];
+            a[i].im = 0;
+        }
+        transform2d(a, H, W, false);
+        FVec out(a.size() * 2);
+        for (size_t i = 0; i < a.size(); i++)
+        {
+            out[2 * i] = (float)a[i].re;
+            out[2 * i + 1] = (float)a[i].im;
+        }
+        return out;
+    }
 
-cv::Mat imag(cv::Mat img)
-{
-    std::vector<cv::Mat> planes;
-    cv::split(img, planes);
-    return planes[1];
-}
+    // complex -> complex, scaled by 1/(H*W)
+    inline FVec ifft2(const FVec &c, int H, int W)
+    {
+        std::vector<cpx> a((size_t)H * W);
+        for (size_t i = 0; i < a.size(); i++)
+        {
+            a[i].re = c[2 * i];
+            a[i].im = c[2 * i + 1];
+        }
+        transform2d(a, H, W, true);
+        FVec out(a.size() * 2);
+        for (size_t i = 0; i < a.size(); i++)
+        {
+            out[2 * i] = (float)a[i].re;
+            out[2 * i + 1] = (float)a[i].im;
+        }
+        return out;
+    }
 
-cv::Mat magnitude(cv::Mat img)
-{
-    cv::Mat res;
-    std::vector<cv::Mat> planes;
-    cv::split(img, planes); // planes[0] = Re(DFT(I), planes[1] = Im(DFT(I))
-    if (planes.size() == 1) res = cv::abs(img);
-    else if (planes.size() == 2) cv::magnitude(planes[0], planes[1], res); // planes[0] = magnitude
-    else assert(0);
-    return res;
-}
+    inline FVec real(const FVec &c)
+    {
+        FVec r(c.size() / 2);
+        for (size_t i = 0; i < r.size(); i++)
+            r[i] = c[2 * i];
+        return r;
+    }
 
-cv::Mat complexMultiplication(cv::Mat a, cv::Mat b)
-{
-    std::vector<cv::Mat> pa;
-    std::vector<cv::Mat> pb;
-    cv::split(a, pa);
-    cv::split(b, pb);
+    // out = a * conj(b)   (cv::mulSpectrums with conjB = true)
+    inline FVec mulSpectrumsConj(const FVec &a, const FVec &b)
+    {
+        FVec o(a.size());
+        for (size_t i = 0; i < a.size() / 2; i++)
+        {
+            float a0 = a[2 * i], a1 = a[2 * i + 1], b0 = b[2 * i], b1 = b[2 * i + 1];
+            o[2 * i] = a0 * b0 + a1 * b1;
+            o[2 * i + 1] = a1 * b0 - a0 * b1;
+        }
+        return o;
+    }
 
-    std::vector<cv::Mat> pres;
-    pres.push_back(pa[0].mul(pb[0]) - pa[1].mul(pb[1]));
-    pres.push_back(pa[0].mul(pb[1]) + pa[1].mul(pb[0]));
+    // Kept EXACTLY like the original repo, including its imaginary part (a1*b0 + a0*b1).
+    // The mathematically correct quotient has a minus there; changing it changes the tracking results.
+    inline FVec complexDivision(const FVec &a, const FVec &b)
+    {
+        FVec o(a.size());
+        for (size_t i = 0; i < a.size() / 2; i++)
+        {
+            float a0 = a[2 * i], a1 = a[2 * i + 1], b0 = b[2 * i], b1 = b[2 * i + 1];
+            float divisor = 1.f / (b0 * b0 + b1 * b1);
+            o[2 * i] = (a0 * b0 + a1 * b1) * divisor;
+            o[2 * i + 1] = (a1 * b0 + a0 * b1) * divisor;
+        }
+        return o;
+    }
 
-    cv::Mat res;
-    cv::merge(pres, res);
+    // swap quadrants of a real H*W array (cx = W/2, cy = H/2), same as the original rearrange()
+    inline void rearrange(FVec &img, int H, int W)
+    {
+        const int cx = W / 2, cy = H / 2;
+        for (int y = 0; y < cy; y++)
+            for (int x = 0; x < cx; x++)
+            {
+                std::swap(img[(size_t)y * W + x], img[(size_t)(y + cy) * W + (x + cx)]);
+                std::swap(img[(size_t)y * W + (x + cx)], img[(size_t)(y + cy) * W + x]);
+            }
+    }
 
-    return res;
-}
-
-cv::Mat complexDivision(cv::Mat a, cv::Mat b)
-{
-    std::vector<cv::Mat> pa;
-    std::vector<cv::Mat> pb;
-    cv::split(a, pa);
-    cv::split(b, pb);
-
-    cv::Mat divisor = 1. / (pb[0].mul(pb[0]) + pb[1].mul(pb[1]));
-
-    std::vector<cv::Mat> pres;
-
-    pres.push_back((pa[0].mul(pb[0]) + pa[1].mul(pb[1])).mul(divisor));
-    pres.push_back((pa[1].mul(pb[0]) + pa[0].mul(pb[1])).mul(divisor));
-
-    cv::Mat res;
-    cv::merge(pres, res);
-    return res;
-}
-
-void rearrange(cv::Mat &img)
-{
-    // img = img(cv::Rect(0, 0, img.cols & -2, img.rows & -2));
-    int cx = img.cols / 2;
-    int cy = img.rows / 2;
-
-    cv::Mat q0(img, cv::Rect(0, 0, cx, cy)); // Top-Left - Create a ROI per quadrant
-    cv::Mat q1(img, cv::Rect(cx, 0, cx, cy)); // Top-Right
-    cv::Mat q2(img, cv::Rect(0, cy, cx, cy)); // Bottom-Left
-    cv::Mat q3(img, cv::Rect(cx, cy, cx, cy)); // Bottom-Right
-
-    cv::Mat tmp; // swap quadrants (Top-Left with Bottom-Right)
-    q0.copyTo(tmp);
-    q3.copyTo(q0);
-    tmp.copyTo(q3);
-    q1.copyTo(tmp); // swap quadrant (Top-Right with Bottom-Left)
-    q2.copyTo(q1);
-    tmp.copyTo(q2);
-}
-/*
-template < typename type>
-cv::Mat fouriertransFull(const cv::Mat & in)
-{
-    return fftd(in);
-
-    cv::Mat planes[] = {cv::Mat_<type > (in), cv::Mat_<type>::zeros(in.size())};
-    cv::Mat t;
-    assert(planes[0].depth() == planes[1].depth());
-    assert(planes[0].size == planes[1].size);
-    cv::merge(planes, 2, t);
-    cv::dft(t, t);
-
-    //cv::normalize(a, a, 0, 1, CV_MINMAX);
-    //cv::normalize(t, t, 0, 1, CV_MINMAX);
-
-    // cv::imshow("a",real(a));
-    //  cv::imshow("b",real(t));
-    // cv::waitKey(0);
-
-    return t;
-}*/
-
-void normalizedLogTransform(cv::Mat &img)
-{
-    img = cv::abs(img);
-    img += cv::Scalar::all(1);
-    cv::log(img, img);
-    // cv::normalize(img, img, 0, 1, CV_MINMAX);
-}
-
-}
+} // namespace FFTTools

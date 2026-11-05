@@ -82,11 +82,16 @@ the use of this software, even if advised of the possibility of such damage.
 
 #pragma once
 
+#include <vector>
+#include <cassert>
 #include "tracker.h"
 
-#ifndef _OPENCV_KCFTRACKER_HPP_
-#define _OPENCV_KCFTRACKER_HPP_
-#endif
+// Data layouts used by the scalar tracker:
+//   real feature map : std::vector<float>, channel-major, f[c*N + p], N = size_patch[0]*size_patch[1],
+//                      p = y*size_patch[1] + x   (same layout as the old FeaturesMap Mat, C rows x N cols)
+//   complex 2D array : std::vector<float>, interleaved re/im, size 2*H*W   (same as the old CV_32FC2 Mat)
+//   real 2D array    : std::vector<float>, row-major, size H*W             (same as the old CV_32F Mat)
+typedef std::vector<float> FVec;
 
 class KCFTracker : public Tracker
 {
@@ -94,38 +99,40 @@ public:
     // Constructor
     KCFTracker(bool hog = true, bool fixed_window = true, bool multiscale = true, bool lab = true);
 
-    // Initialize tracker 
-    virtual void init(const cv::Rect &roi, cv::Mat image);
-    
-    // Update position based on the new frame
-    virtual cv::Rect update(cv::Mat image);
+    // Initialize tracker
+    virtual void init(const kcf::Rect &roi, const kcf::Image8 &image);
 
-    float interp_factor; // linear interpolation factor for adaptation
-    float sigma; // gaussian kernel bandwidth
-    float lambda; // regularization
-    int cell_size; // HOG cell size
-    int cell_sizeQ; // cell size^2, to avoid repeated operations
-    float padding; // extra area surrounding the target
+    // Update position based on the new frame
+    virtual kcf::Rect update(const kcf::Image8 &image);
+
+    float interp_factor;       // linear interpolation factor for adaptation
+    float sigma;               // gaussian kernel bandwidth
+    float lambda;              // regularization
+    int cell_size;             // HOG cell size
+    int cell_sizeQ;            // cell size^2, to avoid repeated operations
+    float padding;             // extra area surrounding the target
     float output_sigma_factor; // bandwidth of gaussian target
-    int template_size; // template size
-    float scale_step; // scale step for multi-scale estimation
-    float scale_weight;  // to downweight detection scores of other scales for added stability
+    int template_size;         // template size
+    float scale_step;          // scale step for multi-scale estimation
+    float scale_weight;        // to downweight detection scores of other scales for added stability
 
 protected:
     // Detect object in the current frame.
-    cv::Point2f detect(cv::Mat z, cv::Mat x, float &peak_value);
+    kcf::Point2f detect(const FVec &z, const FVec &x, float &peak_value);
 
     // train tracker with a single image
-    void train(cv::Mat x, float train_interp_factor);
+    void train(const FVec &x, float train_interp_factor);
 
-    // Evaluates a Gaussian kernel with bandwidth SIGMA for all relative shifts between input images X and Y, which must both be MxN. They must    also be periodic (ie., pre-processed with a cosine window).
-    cv::Mat gaussianCorrelation(cv::Mat x1, cv::Mat x2);
+    // Evaluates a Gaussian kernel with bandwidth SIGMA for all relative shifts between input
+    // images X and Y, which must both be MxN. They must also be periodic (ie., pre-processed
+    // with a cosine window). Returns a real H*W array.
+    FVec gaussianCorrelation(const FVec &x1, const FVec &x2);
 
-    // Create Gaussian Peak. Function called only in the first frame.
-    cv::Mat createGaussianPeak(int sizey, int sizex);
+    // Create Gaussian Peak (already FFT'd, complex H*W). Function called only in the first frame.
+    FVec createGaussianPeak(int sizey, int sizex);
 
     // Obtain sub-window from image, with replication-padding and extract features
-    cv::Mat getFeatures(const cv::Mat & image, bool inithann, float scale_adjust = 1.0f);
+    FVec getFeatures(const kcf::Image8 &image, bool inithann, float scale_adjust = 1.0f);
 
     // Initialize Hanning window. Function called only in the first frame.
     void createHanningMats();
@@ -133,17 +140,14 @@ protected:
     // Calculate sub-pixel peak for one dimension
     float subPixelPeak(float left, float center, float right);
 
-    cv::Mat _alphaf;
-    cv::Mat _prob;
-    cv::Mat _tmpl;
-    cv::Mat _num;
-    cv::Mat _den;
-    cv::Mat _labCentroids;
+    FVec _alphaf; // complex, size_patch[0]*size_patch[1]
+    FVec _prob;   // complex, size_patch[0]*size_patch[1]
+    FVec _tmpl;   // real, size_patch[2] * size_patch[0]*size_patch[1]
 
 private:
-    int size_patch[3];
-    std::vector<float> hann;
-    cv::Size _tmpl_sz;
+    int size_patch[3]; // [0]=rows(H), [1]=cols(W), [2]=channels(C)
+    FVec hann;         // channel-major window, size_patch[2]*H*W (gray: H*W)
+    kcf::Size _tmpl_sz;
     float _scale;
     int _gaussian_size;
     bool _hogfeatures;

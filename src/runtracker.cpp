@@ -2,20 +2,61 @@
 #include <fstream>
 #include <sstream>
 #include <algorithm>
-
-#include <opencv2/core/core.hpp>
-#include <opencv2/highgui/highgui.hpp>
+#include <cstring>
+#include <cstdio>
 
 #include "kcftracker.hpp"
 
-#include <dirent.h>
-
 using namespace std;
-using namespace cv;
 
-int main(int argc, char* argv[]){
+static bool readPPM(const string &path, kcf::Image8 &img)
+{
+	ifstream f(path.c_str(), ios::binary);
+	if (!f)
+		return false;
 
-	if (argc > 5) return -1;
+	string magic;
+	f >> magic;
+	if (magic != "P6")
+		return false;
+
+	int vals[3], n = 0;
+	while (n < 3)
+	{
+		f >> ws;
+		if (f.peek() == '#')
+		{
+			string skip;
+			getline(f, skip);
+			continue;
+		}
+		if (!(f >> vals[n]))
+			return false;
+		n++;
+	}
+	int w = vals[0], h = vals[1], maxv = vals[2];
+	if (w <= 0 || h <= 0 || maxv != 255)
+		return false;
+	f.get(); // one whitespace after maxval
+
+	img.w = w;
+	img.h = h;
+	img.ch = 3;
+	img.d.resize((size_t)w * h * 3);
+	f.read((char *)img.d.data(), (streamsize)img.d.size());
+	if ((size_t)f.gcount() != img.d.size())
+		return false;
+
+	for (size_t i = 0; i < img.d.size(); i += 3) // RGB -> BGR, like imread
+		swap(img.d[i], img.d[i + 2]);
+	return true;
+}
+
+int main(int argc, char *argv[])
+{
+
+	if (argc > 5)
+		return -1;
 
 	bool HOG = true;
 	bool FIXEDWINDOW = false;
@@ -23,50 +64,52 @@ int main(int argc, char* argv[]){
 	bool SILENT = true;
 	bool LAB = false;
 
-	for(int i = 0; i < argc; i++){
-		if ( strcmp (argv[i], "hog") == 0 )
+	for (int i = 0; i < argc; i++)
+	{
+		if (strcmp(argv[i], "hog") == 0)
 			HOG = true;
-		if ( strcmp (argv[i], "fixed_window") == 0 )
+		if (strcmp(argv[i], "fixed_window") == 0)
 			FIXEDWINDOW = true;
-		if ( strcmp (argv[i], "singlescale") == 0 )
+		if (strcmp(argv[i], "singlescale") == 0)
 			MULTISCALE = false;
-		if ( strcmp (argv[i], "show") == 0 )
+		if (strcmp(argv[i], "show") == 0)
 			SILENT = false;
-		if ( strcmp (argv[i], "lab") == 0 ){
+		if (strcmp(argv[i], "lab") == 0)
+		{
 			LAB = true;
 			HOG = true;
 		}
-		if ( strcmp (argv[i], "gray") == 0 )
+		if (strcmp(argv[i], "gray") == 0)
 			HOG = false;
 	}
-	
+
 	// Create KCFTracker object
 	KCFTracker tracker(HOG, FIXEDWINDOW, MULTISCALE, LAB);
 
 	// Frame readed
-	Mat frame;
+	kcf::Image8 frame;
 
 	// Tracker results
-	Rect result;
+	kcf::Rect result;
 
 	// Path to list.txt
 	ifstream listFile;
 	string fileName = "images.txt";
-  	listFile.open(fileName);
+	listFile.open(fileName);
 
-  	// Read groundtruth for the 1st frame
-  	ifstream groundtruthFile;
+	// Read groundtruth for the 1st frame
+	ifstream groundtruthFile;
 	string groundtruth = "region.txt";
-  	groundtruthFile.open(groundtruth);
-  	string firstLine;
-  	getline(groundtruthFile, firstLine);
+	groundtruthFile.open(groundtruth);
+	string firstLine;
+	getline(groundtruthFile, firstLine);
 	groundtruthFile.close();
-  	
-  	istringstream ss(firstLine);
 
-  	// Read groundtruth like a dumb
-  	float x1, y1, x2, y2, x3, y3, x4, y4;
-  	char ch;
+	istringstream ss(firstLine);
+
+	// Read groundtruth like a dumb
+	float x1, y1, x2, y2, x3, y3, x4, y4;
+	char ch;
 	ss >> x1;
 	ss >> ch;
 	ss >> y1;
@@ -81,21 +124,19 @@ int main(int argc, char* argv[]){
 	ss >> ch;
 	ss >> x4;
 	ss >> ch;
-	ss >> y4; 
+	ss >> y4;
 
 	// Using min and max of X and Y for groundtruth rectangle
-	float xMin =  min(x1, min(x2, min(x3, x4)));
-	float yMin =  min(y1, min(y2, min(y3, y4)));
+	float xMin = min(x1, min(x2, min(x3, x4)));
+	float yMin = min(y1, min(y2, min(y3, y4)));
 	float width = max(x1, max(x2, max(x3, x4))) - xMin;
 	float height = max(y1, max(y2, max(y3, y4))) - yMin;
 
-	
 	// Read Images
 	ifstream listFramesFile;
 	string listFrames = "images.txt";
 	listFramesFile.open(listFrames);
 	string frameName;
-
 
 	// Write Results
 	ofstream resultsFile;
@@ -105,35 +146,38 @@ int main(int argc, char* argv[]){
 	// Frame counter
 	int nFrames = 0;
 
+	while (getline(listFramesFile, frameName))
+	{
+		if (!frameName.empty() && frameName[frameName.size() - 1] == '\r')
+			frameName.erase(frameName.size() - 1); // Windows line endings
+		if (frameName.empty())
+			continue;
 
-	while ( getline(listFramesFile, frameName) ){
-		frameName = frameName;
+		if (!readPPM(frameName, frame))
+		{
+			fprintf(stderr, "cannot read frame: '%s'\n", frameName.c_str());
+			return -1;
+		}
 
-		// Read each frame from the list
-		frame = imread(frameName, cv::IMREAD_COLOR);
-
-		// First frame, give the groundtruth to the tracker
-		if (nFrames == 0) {
-			tracker.init( Rect(xMin, yMin, width, height), frame );
-			rectangle( frame, Point( xMin, yMin ), Point( xMin+width, yMin+height), Scalar( 0, 255, 255 ), 1, 8 );
+		if (nFrames == 0)
+		{
+			kcf::Rect roi;
+			roi.x = (int)xMin;
+			roi.y = (int)yMin;
+			roi.width = (int)width;
+			roi.height = (int)height;
+			tracker.init(roi, frame);
 			resultsFile << xMin << "," << yMin << "," << width << "," << height << endl;
 		}
-		// Update
-		else{
+		else
+		{
 			result = tracker.update(frame);
-			rectangle( frame, Point( result.x, result.y ), Point( result.x+result.width, result.y+result.height), Scalar( 0, 255, 255 ), 1, 8 );
-			resultsFile << result.x << "," << result.y << "," << result.width << "," << result.height << endl;
+			resultsFile << result.x << "," << result.y << ","
+						<< result.width << "," << result.height << endl;
 		}
-
 		nFrames++;
-
-		if (!SILENT){
-			imshow("Image", frame);
-			waitKey(1);
-		}
 	}
 	resultsFile.close();
 
 	listFile.close();
-
 }

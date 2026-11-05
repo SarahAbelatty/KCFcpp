@@ -1,298 +1,465 @@
-/*
-Unified Pure Scalar KCF Tracker (Student 1 + 2 + 3 Integration)
-*/
 #include "kcftracker.hpp"
 #include "ffttools.hpp"
 #include "recttools.hpp"
 #include "fhog.hpp"
 #include "labdata.hpp"
+#include "scalar_img.hpp"
 #include <vector>
 #include <algorithm>
 #include <cmath>
-#include <cstring>
+#include <cfloat>
+#include <cstdio>
 
 // ============================================================================
-// STUDENT 1: K1 (Pure C++ Bilinear Resize)
+// K5: complex multiplication (interleaved re/im)
 // ============================================================================
-extern void resize_bilinear_scalar(const float* src, int src_w, int src_h, float* dst, int dst_w, int dst_h);
-
-// ============================================================================
-// STUDENT 3: K5 & K6 (Pure C++ Complex Mult & Peak Detection)
-// ============================================================================
-inline void complex_multiply_pure_scalar(const float* a, const float* b, float* out, int total) {
-    for (int i = 0; i < total; i++) {
-        int idx = i * 2; // Stride of 2 floats (8 bytes) for interleaved complex data
-        out[idx]     = (a[idx] * b[idx]) - (a[idx+1] * b[idx+1]); // Real
-        out[idx+1]   = (a[idx] * b[idx+1]) + (a[idx+1] * b[idx]); // Imaginary
+inline void complex_multiply_pure_scalar(const float *a, const float *b, float *out, int total)
+{
+    for (int i = 0; i < total; i++)
+    {
+        int idx = i * 2;
+        out[idx] = (a[idx] * b[idx]) - (a[idx + 1] * b[idx + 1]);
+        out[idx + 1] = (a[idx] * b[idx + 1]) + (a[idx + 1] * b[idx]);
     }
 }
 
-inline void find_peak_subpixel_pure_scalar(const float* response, int rows, int cols, 
-                                           float& max_val, int& mx, int& my, float& sx, float& sy) {
-    max_val = -FLT_MAX; int max_idx = -1;
-    int total = rows * cols;
-    for (int i = 0; i < total; i++) {
-        if (response[i] > max_val) { max_val = response[i]; max_idx = i; }
+// ============================================================================
+// K6: max search + sub-pixel refinement (interior pixels only, as in the original)
+// ============================================================================
+inline void find_peak_subpixel_pure_scalar(const float *response, int rows, int cols,
+                                           float &max_val, float &sx, float &sy)
+{
+    int total = rows * cols, max_idx = 0;
+    max_val = response[0];
+    for (int i = 1; i < total; i++)
+        if (response[i] > max_val)
+        {
+            max_val = response[i];
+            max_idx = i;
+        }
+    const int my = max_idx / cols, mx = max_idx % cols;
+    sx = (float)mx;
+    sy = (float)my;
+
+    if (mx > 0 && mx < cols - 1)
+    {
+        float l = response[my * cols + mx - 1], r = response[my * cols + mx + 1];
+        float div = 2 * max_val - r - l;
+        if (div != 0)
+            sx += (float)(0.5 * (r - l) / div);
     }
-    my = max_idx / cols; mx = max_idx % cols;
-    
-    float c = response[my*cols+mx];
-    float l = response[my*cols + (mx>0 ? mx-1 : mx)];
-    float r = response[my*cols + (mx<cols-1 ? mx+1 : mx)];
-    float t = response[(my>0 ? my-1 : my)*cols + mx];
-    float b = response[(my<rows-1 ? my+1 : my)*cols + mx];
-    
-    float dx = l - 2*c + r;
-    float dy = t - 2*c + b;
-    
-    sx = mx + (std::abs(dx) > 1e-6f ? 0.5f * (l - r) / dx : 0.0f);
-    sy = my + (std::abs(dy) > 1e-6f ? 0.5f * (t - b) / dy : 0.0f);
+    if (my > 0 && my < rows - 1)
+    {
+        float t = response[(my - 1) * cols + mx], b = response[(my + 1) * cols + mx];
+        float div = 2 * max_val - b - t;
+        if (div != 0)
+            sy += (float)(0.5 * (b - t) / div);
+    }
 }
 
 // ============================================================================
-// KCFTracker Implementation
+// KCFTracker
 // ============================================================================
+KCFTracker::KCFTracker(bool hog, bool fixed_window, bool multiscale, bool lab)
+{
+    lambda = 0.0001;
+    padding = 2.5;
+    output_sigma_factor = 0.125;
 
-KCFTracker::KCFTracker(bool hog, bool fixed_window, bool multiscale, bool lab) {
-    lambda = 0.0001; padding = 2.5; output_sigma_factor = 0.125;
-    if (hog) {
-        interp_factor = 0.012; sigma = 0.6; cell_size = 4; _hogfeatures = true;
-        if (lab) {
-            interp_factor = 0.005; sigma = 0.4; output_sigma_factor = 0.1;
-            _labfeatures = true; _labCentroids = cv::Mat(nClusters, 3, CV_32FC1, &data);
+    if (hog)
+    {
+        interp_factor = 0.012;
+        sigma = 0.6;
+        cell_size = 4;
+        _hogfeatures = true;
+        if (lab)
+        {
+            interp_factor = 0.005;
+            sigma = 0.4;
+            output_sigma_factor = 0.1;
+            _labfeatures = true;
             cell_sizeQ = cell_size * cell_size;
-        } else { _labfeatures = false; }
-    } else {
-        interp_factor = 0.075; sigma = 0.2; cell_size = 1; _hogfeatures = false; _labfeatures = false;
+        }
+        else
+        {
+            _labfeatures = false;
+        }
     }
-    if (multiscale) {
-        template_size = 96; scale_step = 1.05; scale_weight = 0.95; fixed_window = true;
-    } else if (fixed_window) {
-        template_size = 96; scale_step = 1;
-    } else {
-        template_size = 1; scale_step = 1;
+    else
+    {
+        interp_factor = 0.075;
+        sigma = 0.2;
+        cell_size = 1;
+        _hogfeatures = false;
+        _labfeatures = false;
+        if (lab)
+            printf("Lab features are only used with HOG features.\n");
+    }
+
+    if (multiscale)
+    {
+        template_size = 96;
+        scale_step = 1.05;
+        scale_weight = 0.95;
+        fixed_window = true;
+    }
+    else if (fixed_window)
+    {
+        template_size = 96;
+        scale_step = 1;
+    }
+    else
+    {
+        template_size = 1;
+        scale_step = 1;
     }
 }
 
-void KCFTracker::init(const cv::Rect &roi, cv::Mat image) {
-    _roi = roi;
+void KCFTracker::init(const kcf::Rect &roi, const kcf::Image8 &image)
+{
+    _roi.x = roi.x;
+    _roi.y = roi.y;
+    _roi.width = roi.width;
+    _roi.height = roi.height;
     assert(roi.width >= 0 && roi.height >= 0);
     _tmpl = getFeatures(image, 1);
     _prob = createGaussianPeak(size_patch[0], size_patch[1]);
-    _alphaf = cv::Mat(size_patch[0], size_patch[1], CV_32FC2, float(0));
+    _alphaf.assign((size_t)2 * size_patch[0] * size_patch[1], 0.f);
     train(_tmpl, 1.0);
 }
 
-cv::Rect KCFTracker::update(cv::Mat image) {
-    if (_roi.x + _roi.width <= 0) _roi.x = -_roi.width + 1;
-    if (_roi.y + _roi.height <= 0) _roi.y = -_roi.height + 1;
-    if (_roi.x >= image.cols - 1) _roi.x = image.cols - 2;
-    if (_roi.y >= image.rows - 1) _roi.y = image.rows - 2;
+kcf::Rect KCFTracker::update(const kcf::Image8 &image)
+{
+    if (_roi.x + _roi.width <= 0)
+        _roi.x = -_roi.width + 1;
+    if (_roi.y + _roi.height <= 0)
+        _roi.y = -_roi.height + 1;
+    if (_roi.x >= image.w - 1)
+        _roi.x = image.w - 2;
+    if (_roi.y >= image.h - 1)
+        _roi.y = image.h - 2;
 
     float cx = _roi.x + _roi.width / 2.0f;
     float cy = _roi.y + _roi.height / 2.0f;
-    float peak_value;
-    cv::Point2f res = detect(_tmpl, getFeatures(image, 0, 1.0f), peak_value);
 
-    if (scale_step != 1) {
+    float peak_value;
+    kcf::Point2f res = detect(_tmpl, getFeatures(image, 0, 1.0f), peak_value);
+
+    if (scale_step != 1)
+    {
         float new_peak_value;
-        cv::Point2f new_res = detect(_tmpl, getFeatures(image, 0, 1.0f / scale_step), new_peak_value);
-        if (scale_weight * new_peak_value > peak_value) {
-            res = new_res; peak_value = new_peak_value; _scale /= scale_step;
-            _roi.width /= scale_step; _roi.height /= scale_step;
+        kcf::Point2f new_res = detect(_tmpl, getFeatures(image, 0, 1.0f / scale_step), new_peak_value);
+        if (scale_weight * new_peak_value > peak_value)
+        {
+            res = new_res;
+            peak_value = new_peak_value;
+            _scale /= scale_step;
+            _roi.width /= scale_step;
+            _roi.height /= scale_step;
         }
         new_res = detect(_tmpl, getFeatures(image, 0, scale_step), new_peak_value);
-        if (scale_weight * new_peak_value > peak_value) {
-            res = new_res; peak_value = new_peak_value; _scale *= scale_step;
-            _roi.width *= scale_step; _roi.height *= scale_step;
+        if (scale_weight * new_peak_value > peak_value)
+        {
+            res = new_res;
+            peak_value = new_peak_value;
+            _scale *= scale_step;
+            _roi.width *= scale_step;
+            _roi.height *= scale_step;
         }
     }
 
     _roi.x = cx - _roi.width / 2.0f + ((float)res.x * cell_size * _scale);
     _roi.y = cy - _roi.height / 2.0f + ((float)res.y * cell_size * _scale);
 
-    if (_roi.x >= image.cols - 1) _roi.x = image.cols - 1;
-    if (_roi.y >= image.rows - 1) _roi.y = image.rows - 1;
-    if (_roi.x + _roi.width <= 0) _roi.x = -_roi.width + 2;
-    if (_roi.y + _roi.height <= 0) _roi.y = -_roi.height + 2;
+    if (_roi.x >= image.w - 1)
+        _roi.x = image.w - 1;
+    if (_roi.y >= image.h - 1)
+        _roi.y = image.h - 1;
+    if (_roi.x + _roi.width <= 0)
+        _roi.x = -_roi.width + 2;
+    if (_roi.y + _roi.height <= 0)
+        _roi.y = -_roi.height + 2;
     assert(_roi.width >= 0 && _roi.height >= 0);
 
-    cv::Mat x = getFeatures(image, 0);
+    FVec x = getFeatures(image, 0);
     train(x, interp_factor);
-    return _roi;
+
+    return kcf::toRect(_roi); // rounds like cv::Rect did
 }
 
-// --- STUDENT 3 INTEGRATION: Pure Scalar K5 & K6 ---
-cv::Point2f KCFTracker::detect(cv::Mat z, cv::Mat x, float &peak_value) {
+kcf::Point2f KCFTracker::detect(const FVec &z, const FVec &x, float &peak_value)
+{
     using namespace FFTTools;
-    cv::Mat k = gaussianCorrelation(x, z);
-    cv::Mat k_fft = fftd(k);
+    const int H = size_patch[0], W = size_patch[1];
 
-    // K5: Pure C++ Complex Multiplication (Zero-Copy Pointer Bridge)
-    cv::Mat res_complex(_alphaf.size(), CV_32FC2, cv::Scalar(0));
-    int total_pixels = _alphaf.rows * _alphaf.cols;
-    complex_multiply_pure_scalar((const float*)_alphaf.data, (const float*)k_fft.data, 
-                                 (float*)res_complex.data, total_pixels);
+    FVec k = gaussianCorrelation(x, z);
+    FVec kf = fft2(k.data(), H, W);
 
-    cv::Mat res = real(fftd(res_complex, true));
+    FVec rc((size_t)2 * H * W);
+    complex_multiply_pure_scalar(_alphaf.data(), kf.data(), rc.data(), H * W); // K5
+    FVec res = real(ifft2(rc, H, W));
 
-    // K6: Pure C++ Peak Detection (Zero-Copy Pointer Bridge)
-    float max_val, sx, sy; int mx, my;
-    cv::Mat res_float = (res.type() != CV_32F) ? res.clone() : res;
-    find_peak_subpixel_pure_scalar((const float*)res_float.data, res_float.rows, res_float.cols, 
-                                   max_val, mx, my, sx, sy);
-    
-    peak_value = max_val;
-    cv::Point2f p(sx, sy);
-    p.x -= (res.cols) / 2;
-    p.y -= (res.rows) / 2;
+    float sx, sy;
+    find_peak_subpixel_pure_scalar(res.data(), H, W, peak_value, sx, sy); // K6
+
+    kcf::Point2f p;
+    p.x = sx - (W / 2);
+    p.y = sy - (H / 2);
     return p;
 }
 
-void KCFTracker::train(cv::Mat x, float train_interp_factor) {
+void KCFTracker::train(const FVec &x, float f)
+{
     using namespace FFTTools;
-    cv::Mat k = gaussianCorrelation(x, x);
-    cv::Mat alphaf = complexDivision(_prob, (fftd(k) + lambda));
-    _tmpl = (1 - train_interp_factor) * _tmpl + (train_interp_factor) * x;
-    _alphaf = (1 - train_interp_factor) * _alphaf + (train_interp_factor) * alphaf;
+    const int H = size_patch[0], W = size_patch[1];
+
+    FVec k = gaussianCorrelation(x, x);
+    FVec kf = fft2(k.data(), H, W);
+    for (int i = 0; i < H * W; i++)
+        kf[2 * i] += lambda; // lambda on the real part only
+    FVec alphaf = complexDivision(_prob, kf);
+
+    const float a = 1 - f;
+    for (size_t i = 0; i < _tmpl.size(); i++)
+        _tmpl[i] = a * _tmpl[i] + f * x[i];
+    for (size_t i = 0; i < _alphaf.size(); i++)
+        _alphaf[i] = a * _alphaf[i] + f * alphaf[i];
 }
 
-cv::Mat KCFTracker::gaussianCorrelation(cv::Mat x1, cv::Mat x2) {
+FVec KCFTracker::gaussianCorrelation(const FVec &x1, const FVec &x2)
+{
     using namespace FFTTools;
-    cv::Mat c = cv::Mat(cv::Size(size_patch[1], size_patch[0]), CV_32F, cv::Scalar(0));
-    if (_hogfeatures) {
-        cv::Mat caux, x1aux, x2aux;
-        for (int i = 0; i < size_patch[2]; i++) {
-            x1aux = x1.row(i).reshape(1, size_patch[0]);
-            x2aux = x2.row(i).reshape(1, size_patch[0]);
-            cv::mulSpectrums(fftd(x1aux), fftd(x2aux), caux, 0, true);
-            caux = fftd(caux, true); rearrange(caux); caux.convertTo(caux, CV_32F);
-            c = c + real(caux);
-        }
-    } else {
-        cv::mulSpectrums(fftd(x1), fftd(x2), c, 0, true);
-        c = fftd(c, true); rearrange(c); c = real(c);
+    const int H = size_patch[0], W = size_patch[1], C = size_patch[2];
+    const int N = H * W;
+
+    FVec c(N, 0.f);
+    for (int i = 0; i < C; i++)
+    { // gray is just C == 1
+        FVec a = fft2(&x1[(size_t)i * N], H, W);
+        FVec b = fft2(&x2[(size_t)i * N], H, W);
+        FVec prod = mulSpectrumsConj(a, b);
+        FVec r = real(ifft2(prod, H, W));
+        rearrange(r, H, W);
+        for (int j = 0; j < N; j++)
+            c[j] += r[j];
     }
-    cv::Mat d;
-    cv::max(((cv::sum(x1.mul(x1))[0] + cv::sum(x2.mul(x2))[0]) - 2. * c) / (size_patch[0]*size_patch[1]*size_patch[2]), 0, d);
-    cv::Mat k; cv::exp((-d / (sigma * sigma)), k);
+
+    double s1 = 0, s2 = 0;
+    for (size_t i = 0; i < x1.size(); i++)
+    {
+        float p = x1[i] * x1[i];
+        s1 += (double)p;
+    }
+    for (size_t i = 0; i < x2.size(); i++)
+    {
+        float p = x2[i] * x2[i];
+        s2 += (double)p;
+    }
+
+    const float tot = (float)(s1 + s2);
+    const float inv = (float)(1.0 / (double)(H * W * C));
+    const float sig = (float)(1.0 / (double)(sigma * sigma));
+
+    FVec k(N);
+    for (int j = 0; j < N; j++)
+    {
+        float d = (tot - 2.f * c[j]) * inv;
+        if (d < 0.f)
+            d = 0.f;
+        k[j] = std::exp(-d * sig);
+    }
     return k;
 }
 
-cv::Mat KCFTracker::createGaussianPeak(int sizey, int sizex) {
-    cv::Mat_<float> res(sizey, sizex);
+FVec KCFTracker::createGaussianPeak(int sizey, int sizex)
+{
+    FVec res((size_t)sizey * sizex);
     int syh = sizey / 2, sxh = sizex / 2;
     float output_sigma = std::sqrt((float)sizex * sizey) / padding * output_sigma_factor;
     float mult = -0.5 / (output_sigma * output_sigma);
+
     for (int i = 0; i < sizey; i++)
         for (int j = 0; j < sizex; j++)
-            res(i, j) = std::exp(mult * (float)((i - syh)*(i - syh) + (j - sxh)*(j - sxh)));
-    return FFTTools::fftd(res);
+        {
+            int ih = i - syh, jh = j - sxh;
+            res[(size_t)i * sizex + j] = std::exp(mult * (float)(ih * ih + jh * jh));
+        }
+    return FFTTools::fft2(res.data(), sizey, sizex);
 }
 
-// --- STUDENT 1 & 2 INTEGRATION: Pure Scalar Feature Extraction ---
-cv::Mat KCFTracker::getFeatures(const cv::Mat &image, bool inithann, float scale_adjust) {
-    cv::Rect extracted_roi;
+FVec KCFTracker::getFeatures(const kcf::Image8 &image, bool inithann, float scale_adjust)
+{
+    kcf::Rect extracted_roi;
     float cx = _roi.x + _roi.width / 2;
     float cy = _roi.y + _roi.height / 2;
-    
-    if (inithann) {
-        int padded_w = _roi.width * padding, padded_h = _roi.height * padding;
-        if (template_size > 1) {
-            _scale = (padded_w >= padded_h) ? padded_w / (float)template_size : padded_h / (float)template_size;
-            _tmpl_sz.width = padded_w / _scale; _tmpl_sz.height = padded_h / _scale;
-        } else {
-            _tmpl_sz.width = padded_w; _tmpl_sz.height = padded_h; _scale = 1;
+
+    if (inithann)
+    {
+        int padded_w = _roi.width * padding;
+        int padded_h = _roi.height * padding;
+
+        if (template_size > 1)
+        {
+            if (padded_w >= padded_h)
+                _scale = padded_w / (float)template_size;
+            else
+                _scale = padded_h / (float)template_size;
+            _tmpl_sz.width = padded_w / _scale;
+            _tmpl_sz.height = padded_h / _scale;
         }
-        if (_hogfeatures) {
-            _tmpl_sz.width = (((int)(_tmpl_sz.width / (2 * cell_size))) * 2 * cell_size) + cell_size*2;
-            _tmpl_sz.height = (((int)(_tmpl_sz.height / (2 * cell_size))) * 2 * cell_size) + cell_size*2;
-        } else {
-            _tmpl_sz.width = (_tmpl_sz.width / 2) * 2; _tmpl_sz.height = (_tmpl_sz.height / 2) * 2;
+        else
+        {
+            _tmpl_sz.width = padded_w;
+            _tmpl_sz.height = padded_h;
+            _scale = 1;
+        }
+
+        if (_hogfeatures)
+        {
+            _tmpl_sz.width = (((int)(_tmpl_sz.width / (2 * cell_size))) * 2 * cell_size) + cell_size * 2;
+            _tmpl_sz.height = (((int)(_tmpl_sz.height / (2 * cell_size))) * 2 * cell_size) + cell_size * 2;
+        }
+        else
+        {
+            _tmpl_sz.width = (_tmpl_sz.width / 2) * 2;
+            _tmpl_sz.height = (_tmpl_sz.height / 2) * 2;
         }
     }
-    
+
     extracted_roi.width = scale_adjust * _scale * _tmpl_sz.width;
     extracted_roi.height = scale_adjust * _scale * _tmpl_sz.height;
     extracted_roi.x = cx - extracted_roi.width / 2;
     extracted_roi.y = cy - extracted_roi.height / 2;
-    
-    cv::Mat FeaturesMap;  
-    cv::Mat z = RectTools::subwindow(image, extracted_roi, cv::BORDER_REPLICATE);
-    
-    // STUDENT 1: K1 (Pure C++ Resize)
-    if (z.cols != _tmpl_sz.width || z.rows != _tmpl_sz.height) {
-        cv::Mat z_gray;
-        if (z.channels() == 3) cv::cvtColor(z, z_gray, cv::COLOR_BGR2GRAY); 
-        else z_gray = z.clone();
-        z_gray.convertTo(z_gray, CV_32F);
-        
-        std::vector<float> src_buf(z_gray.rows * z_gray.cols);
-        std::vector<float> dst_buf(_tmpl_sz.height * _tmpl_sz.width);
-        std::memcpy(src_buf.data(), z_gray.data, sizeof(float) * src_buf.size()); // Zero-copy read
-        
-        resize_bilinear_scalar(src_buf.data(), z_gray.cols, z_gray.rows, 
-                               dst_buf.data(), _tmpl_sz.width, _tmpl_sz.height);
-        
-        z = cv::Mat(_tmpl_sz.height, _tmpl_sz.width, CV_32F);
-        std::memcpy(z.data, dst_buf.data(), sizeof(float) * dst_buf.size()); // Zero-copy write
-    }
 
-    // STUDENT 2: K2, K3 (Pure C++ HOG, NO IplImage!)
-    if (_hogfeatures) {
+    // crop with replicated border, then K1 resize (8-bit, all channels)
+    kcf::Image8 crop, resized;
+    RectTools::subwindow(image, extracted_roi, crop);
+    const kcf::Image8 *zp = &crop;
+    if (crop.w != _tmpl_sz.width || crop.h != _tmpl_sz.height)
+    {
+        ScalarImg::resizeLinear(crop, _tmpl_sz.width, _tmpl_sz.height, resized);
+        zp = &resized;
+    }
+    const kcf::Image8 &z = *zp;
+
+    FVec feat; // channel-major: feat[c*N + p]
+    int N;
+
+    if (_hogfeatures)
+    {
+        // K2/K3 + normalization + PCA
         CvLSVMFeatureMapCaskade *map;
-        // NEW SIGNATURE: Pass raw pointers directly!
-        getFeatureMaps((const unsigned char*)z.data, z.cols, z.rows, (int)z.step1(), 1, cell_size, &map);
-        
+        getFeatureMaps(z.d.data(), z.w, z.h, z.stride(), z.ch, cell_size, &map);
         normalizeAndTruncate(map, 0.2f);
         PCAFeatureMaps(map);
-        
-        size_patch[0] = map->sizeY; size_patch[1] = map->sizeX; size_patch[2] = map->numFeatures;
-        FeaturesMap = cv::Mat(cv::Size(map->numFeatures, map->sizeX * map->sizeY), CV_32F, map->map);
-        FeaturesMap = FeaturesMap.t();
+        size_patch[0] = map->sizeY;
+        size_patch[1] = map->sizeX;
+        size_patch[2] = map->numFeatures;
+
+        N = map->sizeX * map->sizeY;
+        const int C = map->numFeatures;
+        feat.assign((size_t)(C + (_labfeatures ? nClusters : 0)) * N, 0.f);
+        for (int p = 0; p < N; p++)
+            for (int c = 0; c < C; c++)
+                feat[(size_t)c * N + p] = map->map[p * C + c];
         freeFeatureMapObject(&map);
-    } else {
-        FeaturesMap = RectTools::getGrayImage(z);
-        FeaturesMap -= (float)0.5;
-        size_patch[0] = z.rows; size_patch[1] = z.cols; size_patch[2] = 1;  
+
+        if (_labfeatures)
+        {
+            kcf::Image8 lab;
+            ScalarImg::bgr2lab8(z, lab);
+            const float *cent = &data[0][0];
+            const int lstride = lab.stride();
+
+            int cntCell = 0;
+            for (int cY = cell_size; cY < z.h - cell_size; cY += cell_size)
+            {
+                for (int cX = cell_size; cX < z.w - cell_size; cX += cell_size)
+                {
+                    for (int y = cY; y < cY + cell_size; ++y)
+                    {
+                        for (int x = cX; x < cX + cell_size; ++x)
+                        {
+                            const unsigned char *px = &lab.d[(size_t)y * lstride + x * 3];
+                            float l = (float)px[0], a = (float)px[1], b = (float)px[2];
+                            float minDist = FLT_MAX;
+                            int minIdx = 0;
+                            for (int k = 0; k < nClusters; ++k)
+                            {
+                                float dl = l - cent[3 * k], da = a - cent[3 * k + 1], db = b - cent[3 * k + 2];
+                                float dist = dl * dl + da * da + db * db;
+                                if (dist < minDist)
+                                {
+                                    minDist = dist;
+                                    minIdx = k;
+                                }
+                            }
+                            feat[(size_t)(C + minIdx) * N + cntCell] += 1.0 / cell_sizeQ;
+                        }
+                    }
+                    cntCell++;
+                }
+            }
+            size_patch[2] += nClusters;
+        }
     }
-    
-    if (inithann) createHanningMats();
-    
-    // STUDENT 2: K4 (Pure C++ Hanning Multiply)
-    if (!FeaturesMap.isContinuous()) FeaturesMap = FeaturesMap.clone();
-    float *f = FeaturesMap.ptr<float>(0);
-    int total = size_patch[2] * size_patch[0] * size_patch[1];
-    for (int i = 0; i < total; i++) f[i] *= hann[i];
-    
-    return FeaturesMap;
+    else
+    {
+        std::vector<float> g;
+        RectTools::getGrayImage(z, g);
+        size_patch[0] = z.h;
+        size_patch[1] = z.w;
+        size_patch[2] = 1;
+        N = z.w * z.h;
+        feat.resize(N);
+        for (int i = 0; i < N; i++)
+            feat[i] = g[i] - 0.5f; // as in the paper
+    }
+
+    if (inithann)
+        createHanningMats();
+
+    // K4: Hanning multiply
+    const size_t total = (size_t)size_patch[2] * N;
+    for (size_t i = 0; i < total; i++)
+        feat[i] *= hann[i];
+
+    return feat;
 }
 
-void KCFTracker::createHanningMats() {
+void KCFTracker::createHanningMats()
+{
     const int H = size_patch[0], W = size_patch[1];
     const double PI_D = 3.14159265358979323846;
     std::vector<float> hann1t(W, 0.f), hann2t(H, 0.f);
-    for (int i = 0; i < W; i++) hann1t[i] = 0.5 * (1 - std::cos(2 * PI_D * i / (W - 1)));
-    for (int i = 0; i < H; i++) hann2t[i] = 0.5 * (1 - std::cos(2 * PI_D * i / (H - 1)));
-    
+    for (int i = 0; i < W; i++)
+        hann1t[i] = 0.5 * (1 - std::cos(2 * PI_D * i / (W - 1)));
+    for (int i = 0; i < H; i++)
+        hann2t[i] = 0.5 * (1 - std::cos(2 * PI_D * i / (H - 1)));
+
     std::vector<float> hann2d((size_t)H * W, 0.f);
     for (int y = 0; y < H; y++)
         for (int x = 0; x < W; x++)
             hann2d[(size_t)y * W + x] = hann2t[y] * hann1t[x];
-            
-    if (_hogfeatures) {
+
+    if (_hogfeatures)
+    {
         const int N = H * W;
         hann.assign((size_t)size_patch[2] * N, 0.f);
         for (int i = 0; i < size_patch[2]; i++)
             for (int j = 0; j < N; j++)
                 hann[(size_t)i * N + j] = hann2d[j];
-    } else {
+    }
+    else
+    {
         hann = hann2d;
     }
 }
 
-float KCFTracker::subPixelPeak(float left, float center, float right) {
+float KCFTracker::subPixelPeak(float left, float center, float right)
+{
     float divisor = 2 * center - right - left;
-    if (divisor == 0) return 0;
+    if (divisor == 0)
+        return 0;
     return 0.5 * (right - left) / divisor;
 }
