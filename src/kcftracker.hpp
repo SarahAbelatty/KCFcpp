@@ -142,7 +142,7 @@ protected:
 
 private:
     int size_patch[3];
-    cv::Mat hann;
+    std::vector<float> hann;
     cv::Size _tmpl_sz;
     float _scale;
     int _gaussian_size;

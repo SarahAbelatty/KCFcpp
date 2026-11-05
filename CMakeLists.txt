@@ -1,17 +1,15 @@
-cmake_minimum_required(VERSION 2.8)
-project(test)
+cmake_minimum_required(VERSION 3.0)
+project(KCF)
 
 find_package(OpenCV REQUIRED)
+include_directories(${OpenCV_INCLUDE_DIRS} src)
 
-if(NOT WIN32)
-ADD_DEFINITIONS("-std=c++0x -O3")
-endif(NOT WIN32)
+# Explicitly list the files so CMake knows exactly what to build
+add_executable(KCF 
+    src/runtracker.cpp 
+    src/kcftracker.cpp 
+    src/fhog.cpp
+    src/resize_bilinear_scalar.cpp
+)
 
-include_directories(src) 
-FILE(GLOB_RECURSE sourcefiles "src/*.cpp")
-add_executable( KCF ${sourcefiles} )
-target_link_libraries( KCF ${OpenCV_LIBS})
-
-
-
-
+target_link_libraries(KCF ${OpenCV_LIBS} pthread m)
